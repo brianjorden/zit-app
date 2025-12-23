@@ -93,10 +93,9 @@ This application uses a distributed architecture to work within GPU memory const
 - **LoRA Support**: Dynamic loading with alpha scaling
 - **Prompt Weighting**: `(word:weight)` syntax for emphasis/de-emphasis
 - **Token Blending**: `[a|b|c]` syntax to blend multiple concepts
-- **Fullscreen Gallery**: Click images to view fullscreen with arrow navigation
 - **Performance Timing**: Encoding, diffusion, and VAE metrics
 - **Extended Metadata**: Full reproduction info in PNG
-- **Keyboard Shortcuts**: Ctrl+Enter to generate, Arrow keys in fullscreen
+- **Keyboard Shortcuts**: Ctrl+Enter to generate
 - **Settings Recall**: Restore previous generation settings
 - **Date Organization**: Output sorted by date
 

@@ -19,6 +19,7 @@ import io
 import json
 import os
 import random
+import sys
 import time
 import warnings
 from dataclasses import dataclass
@@ -291,22 +292,6 @@ def load_models():
 
     transformer.set_attention_backend(config.attention_backend)
     print(f"  Transformer loaded, attention: {config.attention_backend}")
-
-    # Compile transformer for optimized inference
-    compile_cache_dir = Path("./compiled")
-    compile_cache_dir.mkdir(exist_ok=True)
-
-    # Set up torch compile cache
-    torch._dynamo.config.cache_size_limit = 64
-    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(compile_cache_dir)
-
-    print(f"  Compiling transformer (first run may take 1-2 minutes)...")
-    transformer = torch.compile(
-        transformer,
-        mode="default",  # "reduce-overhead" fails due to dynamic .to() calls
-        fullgraph=False,  # Allow graph breaks for compatibility
-    )
-    print(f"  Transformer compiled (cache: {compile_cache_dir})")
 
     # Create pipeline (without text encoder - we use remote)
     pipe = ZImagePipeline(
@@ -800,88 +785,9 @@ def create_ui() -> gr.Blocks:
         text-align: right;
         padding-right: 4px;
     }
-
-    /* Fullscreen Gallery Modal */
-    #gallery-modal {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0, 0, 0, 0.95);
-        display: none;
-        z-index: 9999;
-        align-items: center;
-        justify-content: center;
-    }
-    #gallery-modal.active {
-        display: flex;
-    }
-    #gallery-modal img {
-        max-width: 95%;
-        max-height: 95%;
-        object-fit: contain;
-    }
-
-    /* Navigation Arrows */
-    .gallery-nav {
-        position: absolute;
-        top: 50%;
-        transform: translateY(-50%);
-        width: 60px;
-        height: 80px;
-        background: rgba(255, 255, 255, 0.1);
-        border: none;
-        color: white;
-        font-size: 32px;
-        cursor: pointer;
-        opacity: 0;
-        transition: opacity 0.2s, background 0.2s;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-    }
-    #gallery-modal:hover .gallery-nav {
-        opacity: 1;
-    }
-    .gallery-nav:hover {
-        background: rgba(255, 255, 255, 0.3);
-    }
-    #gallery-nav-left { left: 10px; border-radius: 4px; }
-    #gallery-nav-right { right: 10px; border-radius: 4px; }
-
-    /* Close Button */
-    #gallery-close {
-        position: absolute;
-        top: 15px;
-        right: 20px;
-        width: 50px;
-        height: 50px;
-        background: rgba(255, 255, 255, 0.1);
-        border: none;
-        color: white;
-        font-size: 32px;
-        cursor: pointer;
-        border-radius: 4px;
-        transition: background 0.2s;
-    }
-    #gallery-close:hover {
-        background: rgba(255, 255, 255, 0.3);
-    }
-
-    /* Image Counter */
-    #gallery-counter {
-        position: absolute;
-        bottom: 20px;
-        left: 50%;
-        transform: translateX(-50%);
-        color: rgba(255, 255, 255, 0.7);
-        font-size: 14px;
-        font-family: monospace;
-    }
     """
 
-    # Custom JS for keyboard shortcuts, title progress, and gallery modal
+    # Custom JS for keyboard shortcuts and title progress
     js_head = """
     <script>
     // Ctrl+Enter to generate
@@ -900,120 +806,6 @@ def create_ui() -> gr.Blocks:
             document.title = 'Z-Image';
         }
     };
-
-    // Gallery Fullscreen Modal
-    (function() {
-        let modal = null;
-        let modalImg = null;
-        let counter = null;
-        let images = [];
-        let currentIndex = 0;
-
-        function createModal() {
-            modal = document.createElement('div');
-            modal.id = 'gallery-modal';
-            modal.innerHTML = `
-                <button id="gallery-close">×</button>
-                <button class="gallery-nav" id="gallery-nav-left">❮</button>
-                <img id="gallery-modal-img" src="" alt="Fullscreen">
-                <button class="gallery-nav" id="gallery-nav-right">❯</button>
-                <div id="gallery-counter"></div>
-            `;
-            document.body.appendChild(modal);
-
-            modalImg = document.getElementById('gallery-modal-img');
-            counter = document.getElementById('gallery-counter');
-
-            document.getElementById('gallery-close').addEventListener('click', closeModal);
-            document.getElementById('gallery-nav-left').addEventListener('click', prevImage);
-            document.getElementById('gallery-nav-right').addEventListener('click', nextImage);
-            modal.addEventListener('click', function(e) {
-                if (e.target === modal) closeModal();
-            });
-        }
-
-        function openModal(imgs, idx) {
-            if (!modal) createModal();
-            images = imgs;
-            currentIndex = idx || 0;
-            updateImage();
-            modal.classList.add('active');
-            document.body.style.overflow = 'hidden';
-        }
-
-        function closeModal() {
-            if (modal) {
-                modal.classList.remove('active');
-                document.body.style.overflow = '';
-            }
-        }
-
-        function nextImage() {
-            if (images.length === 0) return;
-            currentIndex = (currentIndex + 1) % images.length;
-            updateImage();
-        }
-
-        function prevImage() {
-            if (images.length === 0) return;
-            currentIndex = (currentIndex - 1 + images.length) % images.length;
-            updateImage();
-        }
-
-        function updateImage() {
-            if (modalImg && images[currentIndex]) {
-                modalImg.src = images[currentIndex];
-                if (counter) {
-                    counter.textContent = (currentIndex + 1) + ' / ' + images.length;
-                }
-            }
-        }
-
-        // Keyboard navigation
-        document.addEventListener('keydown', function(e) {
-            if (!modal || !modal.classList.contains('active')) return;
-            if (e.key === 'Escape') closeModal();
-            if (e.key === 'ArrowLeft') prevImage();
-            if (e.key === 'ArrowRight') nextImage();
-        });
-
-        // Hook into gallery clicks
-        function setupGalleryClicks() {
-            const gallery = document.getElementById('output-gallery');
-            if (!gallery) {
-                setTimeout(setupGalleryClicks, 500);
-                return;
-            }
-
-            gallery.addEventListener('click', function(e) {
-                const img = e.target.closest('img');
-                if (!img) return;
-
-                // Collect all gallery images
-                const allImgs = Array.from(gallery.querySelectorAll('img'));
-                const srcs = allImgs.map(i => i.src).filter(s => s && !s.includes('data:'));
-                if (srcs.length === 0) return;
-
-                // Find clicked index
-                let clickedIdx = allImgs.indexOf(img);
-                if (clickedIdx < 0) clickedIdx = 0;
-
-                openModal(srcs, clickedIdx);
-                e.preventDefault();
-                e.stopPropagation();
-            });
-        }
-
-        // Wait for DOM ready
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', setupGalleryClicks);
-        } else {
-            setTimeout(setupGalleryClicks, 100);
-        }
-
-        // Expose for external use
-        window.galleryModal = { open: openModal, close: closeModal };
-    })();
     </script>
     """
 
@@ -1250,14 +1042,8 @@ def main():
     if debug_mode:
         os.environ["DEBUG"] = "1"
 
-    # Suppress torch compile verbose output unless debug mode
-    if not debug_mode:
-        import logging
-        logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
-        logging.getLogger("torch._inductor").setLevel(logging.ERROR)
-
-    # Override port if specified
-    port = args.port or config.app_port
+    # Use explicit port if specified via CLI, otherwise let Gradio auto-find
+    port = args.port  # None = auto-find available port
 
     # Validate encoder URL
     if not config.encoder_url:
@@ -1285,8 +1071,10 @@ def main():
 
     # Create and launch UI
     demo = create_ui()
-    print(f"\nStarting Z-Image on port {port}...")
-    print(f"Web interface: http://localhost:{port}")
+    if port:
+        print(f"\nStarting Z-Image on port {port}...")
+    else:
+        print(f"\nStarting Z-Image (auto-selecting port)...")
     demo.launch(
         server_name=config.server_name,
         server_port=port,

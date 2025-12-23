@@ -19,6 +19,7 @@ source .venv/bin/activate
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_ALLOC_CONF=expandable_segments:True
 export GRADIO_SERVER_NAME=0.0.0.0
 
 # Color output
