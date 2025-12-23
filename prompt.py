@@ -375,7 +375,17 @@ def _build_char_weights(segments: list[PromptSegment]) -> list[float]:
     return weights
 
 
-def prepare_prompt_for_encoding(prompt: str) -> tuple[str, list[float] | None]:
+@dataclass
+class BlendInfo:
+    """Information about a blend segment for post-encoding processing."""
+    char_start: int  # Start position in clean text
+    char_end: int    # End position in clean text
+    segment: "PromptSegment"  # The original segment with blend list
+
+
+def prepare_prompt_for_encoding(
+    prompt: str,
+) -> tuple[str, list[float] | None, list[BlendInfo]]:
     """
     Prepare a prompt for encoding by handling weight syntax properly.
 
@@ -383,28 +393,34 @@ def prepare_prompt_for_encoding(prompt: str) -> tuple[str, list[float] | None]:
     1. Parses the prompt to extract segments with weights
     2. EXCLUDES segments with weight=0 entirely (they won't be tokenized at all)
     3. Builds per-character weights for remaining segments
+    4. Tracks blend segments for post-encoding processing
 
     Args:
         prompt: Raw prompt string, possibly with (word:weight) syntax
 
     Returns:
-        Tuple of (clean_prompt, char_weights):
+        Tuple of (clean_prompt, char_weights, blend_infos):
         - clean_prompt: Text with syntax removed, weight=0 segments excluded
         - char_weights: Per-character weight list, or None if no weighting needed
+        - blend_infos: List of BlendInfo for blends that need post-processing
     """
     if not has_special_syntax(prompt):
-        return prompt, None
+        return prompt, None, []
 
     segments = parse_prompt(prompt)
 
-    # Check if there are any non-default weights
+    # Check if there are any non-default weights or blends
     has_weights = any(seg.weight != 1.0 for seg in segments)
-    if not has_weights:
-        return _strip_syntax(prompt), None
+    has_blends = any(seg.is_blend() for seg in segments)
 
-    # Build clean text and char weights, EXCLUDING weight=0 segments
+    if not has_weights and not has_blends:
+        return _strip_syntax(prompt), None, []
+
+    # Build clean text, char weights, and track blends
     text_parts = []
     char_weights = []
+    blend_infos = []
+    current_pos = 0
 
     for seg in segments:
         if seg.weight == 0:
@@ -412,21 +428,32 @@ def prepare_prompt_for_encoding(prompt: str) -> tuple[str, list[float] | None]:
             continue
 
         if seg.is_blend():
-            # For blends, use first concept's text
+            # For blends, use first concept's text as placeholder
             blend_text = seg.blend[0].text if seg.blend else ""
+            char_start = current_pos
+            char_end = current_pos + len(blend_text)
+
+            # Track this blend for post-processing
+            blend_infos.append(BlendInfo(
+                char_start=char_start,
+                char_end=char_end,
+                segment=seg,
+            ))
+
             text_parts.append(blend_text)
             char_weights.extend([seg.weight] * len(blend_text))
+            current_pos = char_end
         else:
             text_parts.append(seg.text)
             char_weights.extend([seg.weight] * len(seg.text))
+            current_pos += len(seg.text)
 
     clean_prompt = "".join(text_parts)
 
-    # Check if all remaining weights are 1.0
-    if all(w == 1.0 for w in char_weights):
-        return clean_prompt, None
+    # Check if all remaining weights are 1.0 (blends still need processing)
+    weights_result = char_weights if any(w != 1.0 for w in char_weights) else None
 
-    return clean_prompt, char_weights
+    return clean_prompt, weights_result, blend_infos
 
 
 def _get_token_positions(

@@ -27,7 +27,13 @@ from safetensors.torch import load as safetensors_load, save as safetensors_save
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 from config import load_config, DEFAULT_MAX_SEQUENCE_LENGTH, DEFAULT_ENCODER_SEED
-from prompt import parse_prompt, apply_weights_to_embeddings, has_special_syntax
+from prompt import (
+    parse_prompt,
+    apply_weights_to_embeddings,
+    has_special_syntax,
+    blend_embeddings,
+    BlendInfo,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -145,20 +151,21 @@ def encode_prompts(
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
 
-    # Parse prompts and prepare clean versions + weight info
+    # Parse prompts and prepare clean versions + weight info + blend info
     from prompt import prepare_prompt_for_encoding
     prompt_info = []
     for prompt in prompts:
         if apply_weighting:
-            clean_prompt, char_weights = prepare_prompt_for_encoding(prompt)
+            clean_prompt, char_weights, blend_infos = prepare_prompt_for_encoding(prompt)
         else:
             clean_prompt = prompt
             char_weights = None
-        prompt_info.append((clean_prompt, char_weights))
+            blend_infos = []
+        prompt_info.append((clean_prompt, char_weights, blend_infos))
 
     # Apply chat template to CLEAN prompts (without weight syntax)
     processed_prompts = []
-    for clean_prompt, _ in prompt_info:
+    for clean_prompt, _, _ in prompt_info:
         messages = [{"role": "user", "content": clean_prompt}]
         processed = tokenizer.apply_chat_template(
             messages,
@@ -192,9 +199,16 @@ def encode_prompts(
     # Extract embeddings and compute weights for each prompt
     embeddings_list = []
     weights_list = []
-    for i, (clean_prompt, char_weights) in enumerate(prompt_info):
+    for i, (clean_prompt, char_weights, blend_infos) in enumerate(prompt_info):
         # Only keep non-padded tokens
         emb = prompt_embeds[i][prompt_masks[i]].cpu()
+
+        # Process blend segments if any
+        if blend_infos:
+            emb = _apply_blends(
+                emb, blend_infos, clean_prompt, processed_prompts[i]
+            )
+
         embeddings_list.append(emb)
 
         # Compute token weights if we have char_weights (but don't apply them)
@@ -207,6 +221,186 @@ def encode_prompts(
             weights_list.append(None)
 
     return embeddings_list, weights_list
+
+
+def _encode_single_concept(text: str) -> torch.Tensor:
+    """
+    Encode a single concept text to embeddings.
+
+    Used by blend_embeddings to encode each concept in a blend.
+
+    Args:
+        text: The concept text to encode
+
+    Returns:
+        Embedding tensor of shape [seq_len, hidden_dim]
+    """
+    global text_encoder, tokenizer, device
+
+    # Apply chat template
+    messages = [{"role": "user", "content": text}]
+    processed = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+
+    # Tokenize (no padding needed for single concept)
+    inputs = tokenizer(
+        processed,
+        return_tensors="pt",
+        truncation=True,
+        max_length=DEFAULT_MAX_SEQUENCE_LENGTH,
+    )
+
+    input_ids = inputs.input_ids.to(device)
+    attention_mask = inputs.attention_mask.bool().to(device)
+
+    # Encode
+    with torch.no_grad():
+        outputs = text_encoder(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+        )
+        embeds = outputs.hidden_states[-2]
+
+    # Return only non-padded tokens
+    return embeds[0][attention_mask[0]].cpu()
+
+
+def _apply_blends(
+    embeddings: torch.Tensor,
+    blend_infos: list[BlendInfo],
+    clean_prompt: str,
+    chat_processed: str,
+) -> torch.Tensor:
+    """
+    Apply blend operations to embeddings.
+
+    For each blend segment, encodes all concepts, averages them,
+    and replaces the placeholder tokens in the embedding.
+
+    Args:
+        embeddings: Original embeddings [seq_len, hidden_dim]
+        blend_infos: List of BlendInfo describing each blend
+        clean_prompt: The clean prompt text (used for token mapping)
+        chat_processed: The chat-template-processed prompt
+
+    Returns:
+        Modified embeddings with blends applied
+    """
+    global tokenizer
+
+    # Make a copy to modify
+    result = embeddings.clone()
+
+    for blend_info in blend_infos:
+        # Get the blended embedding
+        blended = blend_embeddings(_encode_single_concept, blend_info.segment)
+
+        # Find which tokens correspond to this blend's position
+        # The blend placeholder is the first concept's text
+        first_concept_text = blend_info.segment.blend[0].text
+
+        # Find the token indices for this blend
+        # We need to map character positions to token positions
+        token_start, token_end = _find_token_range_for_chars(
+            tokenizer, chat_processed, clean_prompt,
+            blend_info.char_start, blend_info.char_end
+        )
+
+        if token_start is not None and token_end is not None:
+            # The blended embedding is a single vector [1, hidden_dim] or [hidden_dim]
+            if blended.dim() == 1:
+                blended = blended.unsqueeze(0)
+
+            # Replace tokens with blended embedding
+            # If blend spans multiple tokens, we average-pool the blended result
+            # into each token position (or just use the same embedding)
+            num_tokens = token_end - token_start
+            if num_tokens > 0:
+                # Expand blended to fill all token positions
+                expanded = blended.expand(num_tokens, -1)
+                result[token_start:token_end] = expanded
+
+            if os.environ.get("DEBUG"):
+                print(f"[DEBUG] BLEND: Applied {len(blend_info.segment.blend)} concepts "
+                      f"at tokens {token_start}:{token_end}", flush=True)
+
+    return result
+
+
+def _find_token_range_for_chars(
+    tokenizer,
+    chat_processed: str,
+    clean_prompt: str,
+    char_start: int,
+    char_end: int,
+) -> tuple[int | None, int | None]:
+    """
+    Find token indices corresponding to character positions.
+
+    Args:
+        tokenizer: The tokenizer
+        chat_processed: The full chat-template-processed prompt
+        clean_prompt: The clean prompt (without chat template)
+        char_start: Start character position in clean_prompt
+        char_end: End character position in clean_prompt
+
+    Returns:
+        Tuple of (token_start, token_end) indices, or (None, None) if not found
+    """
+    # Find where clean_prompt appears in chat_processed
+    # The clean prompt is embedded in the chat template
+    prompt_start = chat_processed.find(clean_prompt)
+    if prompt_start < 0:
+        # Fallback: try to find the substring
+        target = clean_prompt[char_start:char_end]
+        idx = chat_processed.find(target)
+        if idx < 0:
+            return None, None
+        adjusted_start = idx
+        adjusted_end = idx + len(target)
+    else:
+        adjusted_start = prompt_start + char_start
+        adjusted_end = prompt_start + char_end
+
+    # Tokenize to get offsets
+    encoding = tokenizer(
+        chat_processed,
+        return_offsets_mapping=True,
+        add_special_tokens=False,
+    )
+
+    offsets = encoding.offset_mapping
+    token_start = None
+    token_end = None
+
+    for i, (start, end) in enumerate(offsets):
+        if start <= adjusted_start < end:
+            token_start = i
+        if start < adjusted_end <= end:
+            token_end = i + 1
+            break
+
+    # Fallback if we didn't find exact boundaries
+    if token_start is None:
+        for i, (start, end) in enumerate(offsets):
+            if end > adjusted_start:
+                token_start = i
+                break
+
+    if token_end is None and token_start is not None:
+        for i, (start, end) in enumerate(offsets):
+            if start >= adjusted_end:
+                token_end = i
+                break
+        if token_end is None:
+            token_end = len(offsets)
+
+    return token_start, token_end
 
 
 def _compute_token_weights(

@@ -92,9 +92,11 @@ This application uses a distributed architecture to work within GPU memory const
 
 - **LoRA Support**: Dynamic loading with alpha scaling
 - **Prompt Weighting**: `(word:weight)` syntax for emphasis/de-emphasis
+- **Token Blending**: `[a|b|c]` syntax to blend multiple concepts
+- **Fullscreen Gallery**: Click images to view fullscreen with arrow navigation
 - **Performance Timing**: Encoding, diffusion, and VAE metrics
 - **Extended Metadata**: Full reproduction info in PNG
-- **Keyboard Shortcuts**: Ctrl+Enter to generate
+- **Keyboard Shortcuts**: Ctrl+Enter to generate, Arrow keys in fullscreen
 - **Settings Recall**: Restore previous generation settings
 - **Date Organization**: Output sorted by date
 
@@ -159,8 +161,34 @@ When weighting a phrase like `(bright sunset:1.5)`:
 
 - Extreme weights (e.g., `99999`) will produce extreme/broken results
 - Negative weights are experimental and may not behave intuitively
-- Token blending syntax `[a|b|c]` is parsed but **not yet implemented**
-  (currently only uses the first concept)
+
+## Token Blending
+
+Blend multiple concepts into a single embedding position using `[a|b|c]` syntax.
+
+### Syntax
+
+```
+[cat|dog]                    # Blend cat and dog equally
+[red|blue|green]             # Blend three colors
+([fire|ice]:1.5) dragon      # Blend with outer weight applied
+[(cat:0.8)|(dog:1.2)]        # Individual concept weights
+```
+
+### How It Works
+
+1. Each concept in the blend is encoded separately
+2. Multi-token concepts are average-pooled to a single embedding
+3. Individual concept weights are applied (if specified)
+4. All concept embeddings are averaged together
+5. The outer weight (if any) is applied to the final blend
+6. The blended embedding replaces the placeholder tokens
+
+### Use Cases
+
+- Combining visual styles: `a [watercolor|oil painting] landscape`
+- Hybrid creatures: `a [cat|fox|wolf] in the forest`
+- Color mixing: `a [red|blue] car` (produces purple-ish)
 
 ## Files
 

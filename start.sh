@@ -74,6 +74,7 @@ start_app() {
 
     local use_encoder_api=false
     local use_vae_api=false
+    local use_debug=false
 
     # Parse flags
     while [[ $# -gt 0 ]]; do
@@ -84,6 +85,10 @@ start_app() {
                 ;;
             --vae-api)
                 use_vae_api=true
+                shift
+                ;;
+            --debug)
+                use_debug=true
                 shift
                 ;;
             *)
@@ -105,7 +110,13 @@ start_app() {
         info "  Using remote VAE at $VAE_URL"
     fi
 
-    CUDA_VISIBLE_DEVICES=$gpu python app.py
+    local debug_flag=""
+    if [ "$use_debug" = true ]; then
+        debug_flag="--debug"
+        info "  Debug mode enabled"
+    fi
+
+    CUDA_VISIBLE_DEVICES=$gpu python app.py $debug_flag
 }
 
 start_encoder() {

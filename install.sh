@@ -16,6 +16,7 @@ echo ""
 
 echo "==========> Cleaning up old environment..."
 rm -rf .venv
+rm -rf __pycache__
 echo ""
 
 echo "==========> Creating fresh virtual environment..."

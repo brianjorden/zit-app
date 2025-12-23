@@ -1,7 +1,5 @@
 output/
-archive/
-loras/
-archive
+compiled/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

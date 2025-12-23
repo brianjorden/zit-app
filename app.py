@@ -51,6 +51,9 @@ from lora import LoRAManager, LoRAConfig, configs_from_ui_state, format_loras_fo
 warnings.filterwarnings("ignore")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+# Global debug mode flag
+debug_mode = False
+
 
 # =============================================================================
 # Data Classes
@@ -289,6 +292,22 @@ def load_models():
     transformer.set_attention_backend(config.attention_backend)
     print(f"  Transformer loaded, attention: {config.attention_backend}")
 
+    # Compile transformer for optimized inference
+    compile_cache_dir = Path("./compiled")
+    compile_cache_dir.mkdir(exist_ok=True)
+
+    # Set up torch compile cache
+    torch._dynamo.config.cache_size_limit = 64
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(compile_cache_dir)
+
+    print(f"  Compiling transformer (first run may take 1-2 minutes)...")
+    transformer = torch.compile(
+        transformer,
+        mode="default",  # "reduce-overhead" fails due to dynamic .to() calls
+        fullgraph=False,  # Allow graph breaks for compatibility
+    )
+    print(f"  Transformer compiled (cache: {compile_cache_dir})")
+
     # Create pipeline (without text encoder - we use remote)
     pipe = ZImagePipeline(
         scheduler=None,
@@ -372,13 +391,15 @@ def generate_image(
     # Debug: print embedding and weight stats
     import sys
     emb = prompt_embeds[0]
-    token_norms = [f"{emb[i].norm().item():.1f}" for i in range(min(8, len(emb)))]
     weights = prompt_weights[0]
-    if weights is not None:
-        non_default = int((weights != 1.0).sum().item())
-        print(f"[APP DEBUG] Prompt: {prompt[:50]!r}, shape: {emb.shape}, norms: {token_norms}, weights_non_default: {non_default}", file=sys.stderr, flush=True)
-    else:
-        print(f"[APP DEBUG] Prompt: {prompt[:50]!r}, shape: {emb.shape}, norms: {token_norms}, no weights", file=sys.stderr, flush=True)
+
+    if debug_mode:
+        token_norms = [f"{emb[i].norm().item():.1f}" for i in range(min(8, len(emb)))]
+        if weights is not None:
+            non_default = int((weights != 1.0).sum().item())
+            print(f"[DEBUG] Prompt: {prompt[:50]!r}, shape: {emb.shape}, norms: {token_norms}, weights_non_default: {non_default}", file=sys.stderr, flush=True)
+        else:
+            print(f"[DEBUG] Prompt: {prompt[:50]!r}, shape: {emb.shape}, norms: {token_norms}, no weights", file=sys.stderr, flush=True)
 
     # Move embeddings to device
     prompt_embeds = [emb.to(config.transformer_device) for emb in prompt_embeds]
@@ -446,14 +467,16 @@ def generate_image(
                 weighted = output * w.to(output.dtype)
 
             # Debug log
-            non_default = int((w.flatten() != 1.0).sum().item())
-            if non_default > 0:
-                print(f"[HOOK] Applied {non_default} non-default weights to cap_embedder output (output_len={seq_len}, weight_len={weight_len})", file=sys.stderr, flush=True)
+            if debug_mode:
+                non_default = int((w.flatten() != 1.0).sum().item())
+                if non_default > 0:
+                    print(f"[DEBUG] HOOK: Applied {non_default} non-default weights (seq={seq_len}, weights={weight_len})", file=sys.stderr, flush=True)
 
             return weighted
 
         hook_handle = pipe.transformer.cap_embedder.register_forward_hook(cap_embedder_hook)
-        print(f"[HOOK] Registered cap_embedder hook for token weighting", file=sys.stderr, flush=True)
+        if debug_mode:
+            print(f"[DEBUG] HOOK: Registered cap_embedder hook for token weighting", file=sys.stderr, flush=True)
 
     # Generate
     generator = torch.Generator(device=config.transformer_device).manual_seed(seed)
@@ -475,7 +498,8 @@ def generate_image(
         # Always remove the hook
         if hook_handle is not None:
             hook_handle.remove()
-            print(f"[HOOK] Removed cap_embedder hook", file=sys.stderr, flush=True)
+            if debug_mode:
+                print(f"[DEBUG] HOOK: Removed cap_embedder hook", file=sys.stderr, flush=True)
 
     timing.diffusion_ms = int((time.perf_counter() - t0) * 1000)
 
@@ -776,9 +800,88 @@ def create_ui() -> gr.Blocks:
         text-align: right;
         padding-right: 4px;
     }
+
+    /* Fullscreen Gallery Modal */
+    #gallery-modal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.95);
+        display: none;
+        z-index: 9999;
+        align-items: center;
+        justify-content: center;
+    }
+    #gallery-modal.active {
+        display: flex;
+    }
+    #gallery-modal img {
+        max-width: 95%;
+        max-height: 95%;
+        object-fit: contain;
+    }
+
+    /* Navigation Arrows */
+    .gallery-nav {
+        position: absolute;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 60px;
+        height: 80px;
+        background: rgba(255, 255, 255, 0.1);
+        border: none;
+        color: white;
+        font-size: 32px;
+        cursor: pointer;
+        opacity: 0;
+        transition: opacity 0.2s, background 0.2s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    #gallery-modal:hover .gallery-nav {
+        opacity: 1;
+    }
+    .gallery-nav:hover {
+        background: rgba(255, 255, 255, 0.3);
+    }
+    #gallery-nav-left { left: 10px; border-radius: 4px; }
+    #gallery-nav-right { right: 10px; border-radius: 4px; }
+
+    /* Close Button */
+    #gallery-close {
+        position: absolute;
+        top: 15px;
+        right: 20px;
+        width: 50px;
+        height: 50px;
+        background: rgba(255, 255, 255, 0.1);
+        border: none;
+        color: white;
+        font-size: 32px;
+        cursor: pointer;
+        border-radius: 4px;
+        transition: background 0.2s;
+    }
+    #gallery-close:hover {
+        background: rgba(255, 255, 255, 0.3);
+    }
+
+    /* Image Counter */
+    #gallery-counter {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: rgba(255, 255, 255, 0.7);
+        font-size: 14px;
+        font-family: monospace;
+    }
     """
 
-    # Custom JS for keyboard shortcuts and title progress
+    # Custom JS for keyboard shortcuts, title progress, and gallery modal
     js_head = """
     <script>
     // Ctrl+Enter to generate
@@ -797,6 +900,120 @@ def create_ui() -> gr.Blocks:
             document.title = 'Z-Image';
         }
     };
+
+    // Gallery Fullscreen Modal
+    (function() {
+        let modal = null;
+        let modalImg = null;
+        let counter = null;
+        let images = [];
+        let currentIndex = 0;
+
+        function createModal() {
+            modal = document.createElement('div');
+            modal.id = 'gallery-modal';
+            modal.innerHTML = `
+                <button id="gallery-close">×</button>
+                <button class="gallery-nav" id="gallery-nav-left">❮</button>
+                <img id="gallery-modal-img" src="" alt="Fullscreen">
+                <button class="gallery-nav" id="gallery-nav-right">❯</button>
+                <div id="gallery-counter"></div>
+            `;
+            document.body.appendChild(modal);
+
+            modalImg = document.getElementById('gallery-modal-img');
+            counter = document.getElementById('gallery-counter');
+
+            document.getElementById('gallery-close').addEventListener('click', closeModal);
+            document.getElementById('gallery-nav-left').addEventListener('click', prevImage);
+            document.getElementById('gallery-nav-right').addEventListener('click', nextImage);
+            modal.addEventListener('click', function(e) {
+                if (e.target === modal) closeModal();
+            });
+        }
+
+        function openModal(imgs, idx) {
+            if (!modal) createModal();
+            images = imgs;
+            currentIndex = idx || 0;
+            updateImage();
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeModal() {
+            if (modal) {
+                modal.classList.remove('active');
+                document.body.style.overflow = '';
+            }
+        }
+
+        function nextImage() {
+            if (images.length === 0) return;
+            currentIndex = (currentIndex + 1) % images.length;
+            updateImage();
+        }
+
+        function prevImage() {
+            if (images.length === 0) return;
+            currentIndex = (currentIndex - 1 + images.length) % images.length;
+            updateImage();
+        }
+
+        function updateImage() {
+            if (modalImg && images[currentIndex]) {
+                modalImg.src = images[currentIndex];
+                if (counter) {
+                    counter.textContent = (currentIndex + 1) + ' / ' + images.length;
+                }
+            }
+        }
+
+        // Keyboard navigation
+        document.addEventListener('keydown', function(e) {
+            if (!modal || !modal.classList.contains('active')) return;
+            if (e.key === 'Escape') closeModal();
+            if (e.key === 'ArrowLeft') prevImage();
+            if (e.key === 'ArrowRight') nextImage();
+        });
+
+        // Hook into gallery clicks
+        function setupGalleryClicks() {
+            const gallery = document.getElementById('output-gallery');
+            if (!gallery) {
+                setTimeout(setupGalleryClicks, 500);
+                return;
+            }
+
+            gallery.addEventListener('click', function(e) {
+                const img = e.target.closest('img');
+                if (!img) return;
+
+                // Collect all gallery images
+                const allImgs = Array.from(gallery.querySelectorAll('img'));
+                const srcs = allImgs.map(i => i.src).filter(s => s && !s.includes('data:'));
+                if (srcs.length === 0) return;
+
+                // Find clicked index
+                let clickedIdx = allImgs.indexOf(img);
+                if (clickedIdx < 0) clickedIdx = 0;
+
+                openModal(srcs, clickedIdx);
+                e.preventDefault();
+                e.stopPropagation();
+            });
+        }
+
+        // Wait for DOM ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', setupGalleryClicks);
+        } else {
+            setTimeout(setupGalleryClicks, 100);
+        }
+
+        // Expose for external use
+        window.galleryModal = { open: openModal, close: closeModal };
+    })();
     </script>
     """
 
@@ -1014,14 +1231,30 @@ def parse_args():
         default=None,
         help="Port to run on (default: from config)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug output (prompt info, timing details)",
+    )
     return parser.parse_args()
 
 
 def main():
-    global config, pipe, lora_manager
+    global config, pipe, lora_manager, debug_mode
 
     args = parse_args()
+    debug_mode = args.debug
     config = load_config()
+
+    # Set DEBUG env var for other modules (encoder.py uses this)
+    if debug_mode:
+        os.environ["DEBUG"] = "1"
+
+    # Suppress torch compile verbose output unless debug mode
+    if not debug_mode:
+        import logging
+        logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
+        logging.getLogger("torch._inductor").setLevel(logging.ERROR)
 
     # Override port if specified
     port = args.port or config.app_port
